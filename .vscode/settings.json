@@ -95,7 +95,10 @@
         "socket.h": "c",
         "pthread.h": "c",
         "format": "cpp",
-        "span": "cpp"
+        "span": "cpp",
+        "codecvt": "cpp",
+        "stdfloat": "cpp",
+        "__nullptr": "cpp"
     },
     "python.analysis.extraPaths": [
         "python",

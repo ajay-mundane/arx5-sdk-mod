@@ -206,9 +206,13 @@
     </joint>
     <link name="link6">
         <inertial>
-            <origin xyz="0.05435277 0 0" rpy="0 0 0"/>
-            <mass value="0.581000"/>
-            <inertia ixx="0.00029" ixy="0.00000" ixz="0.00000" iyy="0.00028" iyz="-0.00001" izz="0.00045"/>
+            <origin xyz="0.030 0 0" rpy="0 0 0"/> 
+            <mass value="0.571000"/> 
+            <inertia 
+                ixx="0.00020"    ixy="0.00000" 
+                ixz="0.00000" 
+                iyy="0.00020"    iyz="-0.00001" 
+                izz="0.00030"    />
         </inertial>
         <visual>
             <origin xyz="0 0 0" rpy="0 0 0"/>

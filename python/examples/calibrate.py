@@ -69,7 +69,7 @@ def check_motor_movements(model: str, interface: str):
 
 
 if __name__ == "__main__":
-    check_motor_movements()
+    # check_motor_movements()
     ## To actually calibrate, uncomment one of the following lines
     # calibrate_joint()
-    # calibrate_gripper()
+    calibrate_gripper()
