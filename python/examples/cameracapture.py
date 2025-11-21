@@ -18,7 +18,8 @@ class CameraCaptureProcess(mp.Process):
         self.serial_number = serial_number
         self.is_recording = False
         self.loop = True
-        self.image_buffer = defaultdict(list)
+        self.image_buffer = {"timestamps":[], 'color':np.zeros((300,480,640,3)), 'depth':np.zeros((300,480,640))}
+        self.i=0
 
     def run(self):
         try:
@@ -108,9 +109,10 @@ class CameraCaptureProcess(mp.Process):
                 
 
     def _put_data(self, receive_time, color, depth):
-        self.image_buffer['receive_time'].append(receive_time)
-        self.image_buffer["color_depth"].append(color)
-        self.image_buffer['depth'].append(depth)
+        self.image_buffer['timestamps'].append(receive_time)
+        self.image_buffer["color"][self.i] = color
+        self.image_buffer['depth'][self.i] = depth
+        self.i += 1
     
     def _send_data(self):
         for key, val in self.image_buffer.items():
