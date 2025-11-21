@@ -1,3 +1,4 @@
+from collections import defaultdict
 import multiprocessing as mp
 import time
 import numpy as np
@@ -26,14 +27,14 @@ def friction_compensation(vel):
 
 # --- The Robot Process Class ---
 class RobotControlProcess(mp.Process):
-    def __init__(self, cmd_queue, state_queue, config):
+    def __init__(self, cmd_queue, data_queue, config):
         super().__init__(name="Robot-Worker")
         self.cmd_queue = cmd_queue       # To receive high-level commands
-        self.state_queue = state_queue   # To send latest state for UI/Monitoring
+        self.data_queue = data_queue   # To send latest state for UI/Monitoring
         self.config = config
         self.is_recording = False
-        self.recorded_data = []
         self.loop = True
+        self.action_buffer = defaultdict(list)
 
     def run(self):
         try:
@@ -68,20 +69,39 @@ class RobotControlProcess(mp.Process):
             gain.gripper_kp = 0.0
             gain.gripper_kd = 0.0
             leader_R.set_gain(gain)
-            
+
+            self.t_start = time.monotonic()
+            self.iter_idx = 0
+            self.dt = 1/400.0
             while self.loop:
-                loop_start = time.time()
+                now_mono = time.monotonic()
+                now_epoch = time.time()
+
+                # schedule the timestamp for this cycle
+                t_cycle_end = self.t_start + (self.iter_idx + 1) * self.dt
                 
                 # 1. Handle Commands
                 self._handle_commands()
 
                 # 2. Teleoperation Logic
-                self._run_teleop_step(leader_L, leader_R, follower_L, follower_R)
+                action_data = self._run_teleop_step(leader_L, leader_R, follower_L, follower_R)
+
+                # convert scheduled monotonic -> epoch
+                timestamp = t_cycle_end - now_mono + now_epoch
+
+                if self.is_recording:
+                    self._put_data(action_data, timestamp)
 
                 # 3. Enforce Loop Rate
-                elapsed = time.time() - loop_start
-                if dt - elapsed > 0:
-                    time.sleep(dt - elapsed)
+                remaining = t_cycle_end - time.monotonic()
+                if remaining > 0:
+                    time.sleep(remaining)
+
+                duration = time.time() - now_epoch
+                frequency = np.round(1 / duration, 1)
+                # print(f"FPS: {frequency}")
+
+                self.iter_idx += 1
 
         except Exception as e:
             print(f"[Robot-Worker] Critical Error: {e}")
@@ -101,20 +121,18 @@ class RobotControlProcess(mp.Process):
             elif cmd['type'] == 'START_REC':
                 self.is_recording = True
                 self.episode_idx = cmd['ep_idx']
-                self.recorded_data = [] 
 
             elif cmd['type'] == 'STOP_REC':
                 self.is_recording = False
-                self._save_data(self.episode_idx)
+                self._send_data()
                 # Send confirmation back to Conductor after saving
-                self.cmd_queue.put({'type': 'STOPPED', 'ep_idx': self.episode_idx})
+                
 
     def _run_teleop_step(self, l_L, l_R, f_L, f_R):
-        current_timestamp = time.time()
         
         # Read Leader States
-        l_state_L = l_L.get_joint_state()
-        l_state_R = l_R.get_joint_state()
+        l_state_L = l_L.get_joint_state() # leader state left
+        l_state_R = l_R.get_joint_state() # leader state right
 
         # Compute & Write Leader Commands (Friction Comp)
         # tau_L = friction_compensation(l_state_L.gripper_vel)
@@ -142,21 +160,24 @@ class RobotControlProcess(mp.Process):
         f_L.set_joint_cmd(f_cmd_L)
         f_R.set_joint_cmd(f_cmd_R)
 
-        # Record Data
-        data_packet = {
-            'timestamp': current_timestamp,
-            'left_q': l_state_L.pos().copy(), 
-            'left_gripper': l_state_L.gripper_pos,
+        return {
+            "joint_pos_L": f_cmd_L.pos(),
+            "gripper_pos_L": f_cmd_L.gripper_pos,
+            "joint_pos_R": f_cmd_R.pos(),
+            "gripper_pos_R": f_cmd_R.gripper_pos,
         }
 
-        if self.is_recording: self.recorded_data.append(data_packet)
 
         # Send latest state to Conductor for UI update (throttled)
-        if self.state_queue.empty(): self.state_queue.put(pickle.dumps(data_packet))
+        # if self.state_queue.empty(): self.state_queue.put(pickle.dumps(data_packet))
 
-    def _save_data(self, episode_idx):
-        data_dir = "collected_data/robot_logs"
-        os.makedirs(data_dir, exist_ok=True)
-        filename = os.path.join(data_dir, f"robot_ep_{episode_idx}.pkl")
-        with open(filename, 'wb') as f:
-            pickle.dump(self.recorded_data, f)
+    def _put_data(self, action_data, timestamp):
+        for x,y in action_data.items():
+            self.action_buffer[x].append(y)
+        self.action_buffer['action_timestamps'].append(timestamp)
+    
+    def _send_data(self):
+        for key, val in self.action_buffer.items():
+            self.action_buffer[key] = np.array(val)
+        self.data_queue.put(dict(self.action_buffer))
+        self.action_buffer.clear()
