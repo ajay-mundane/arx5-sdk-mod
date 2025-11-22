@@ -99,7 +99,7 @@ class RobotConfigFactory
             0.3,                                                           // gripper_vel_max
             1.5,                                                           // gripper_torque_max
             0.088,                                                         // gripper_width
-            5.03,                                                          // gripper_open_readout
+            5.11,                                                          // gripper_open_readout
             6,                                                             // joint_dof
             std::vector<int>{1, 2, 4, 5, 6, 7},                            // motor_id
             std::vector<MotorType>{MotorType::EC_A4310, MotorType::EC_A4310, MotorType::EC_A4310, MotorType::DM_J4310,
