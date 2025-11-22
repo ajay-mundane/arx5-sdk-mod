@@ -11,32 +11,33 @@ import click
 import numpy as np
 
 
-Kc = 0.18         # Coulomb friction estimate (N·m). Start 0.05-0.3
-Ks = 0.30         # Static (breakaway) friction peak (N·m). >= Kc
-B  = 0.45         # Viscous coefficient (N·m / (rad/s)). Start small
-vs = 0.02         # Stribeck velocity (rad/s). Small value controls transition
-vdead = 0.01  # velocity deadband (rad/s) to avoid jitter
+# Kc = 0.18         # Coulomb friction estimate (N·m). Start 0.05-0.3
+# Ks = 0.30         # Static (breakaway) friction peak (N·m). >= Kc
+# B  = 0.45         # Viscous coefficient (N·m / (rad/s)). Start small
+# vs = 0.02         # Stribeck velocity (rad/s). Small value controls transition
+# vdead = 0.01  # velocity deadband (rad/s) to avoid jitter
 max_torque = 1.5 / 2 - 1e-2  # safety clamp (N·m) — set to a safe value for your gripper
-# --------------------------------
+# # --------------------------------
 
-def stribeck_scaling(v, vs):
-    # smooth transition from static->coulomb (1.0 -> 0.0 with increasing v)
-    # using an exponential like classical Stribeck
-    return np.exp(-(abs(v) / vs)**2)
+# def stribeck_scaling(v, vs):
+#     # smooth transition from static->coulomb (1.0 -> 0.0 with increasing v)
+#     # using an exponential like classical Stribeck
+#     return np.exp(-(abs(v) / vs)**2)
 
-def friction_compensation(vel):
+K_COULOMB = 0.12  # Nm (Assists your push)
+K_VISCOUS = 0.07 # Nm/(rad/s)
+
+VEL_DEADBAND = 0.02 # rad/s (Ignore small accidental movements)
+
+def sign(x):
+    return 1.0 if x > 0 else -1.0 if x < 0 else 0.0
+def friction_compensation(current_vel):
     # vel: joint velocity (rad/s)
-    k = 0.45             # your viscous coefficient
-    assist = 0.05        # constant help torque
-    v_dead = 0.003       # below this, treat as “not moving”
-
-    if abs(vel) < v_dead:
-        tau = 0.0                               # no movement → no torque
+    print(current_vel)
+    if abs(current_vel) > VEL_DEADBAND:
+        return (K_COULOMB * sign(current_vel)) + (K_VISCOUS * current_vel)
     else:
-        direction = np.sign(vel)
-        tau = k * vel + assist * direction      # add small constant help
-    return tau
-
+        return 0.0
 
 @click.command()
 @click.argument("leader_model")  # ARX arm model: X5 or L5

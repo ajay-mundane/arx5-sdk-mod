@@ -6,7 +6,8 @@ import pickle
 import sys
 import os
 import pyrealsense2 as rs
-
+import cv2
+from helper import NumpyAccumulator
 
 # --- The Camera Process Class ---
 class CameraCaptureProcess(mp.Process):
@@ -18,7 +19,7 @@ class CameraCaptureProcess(mp.Process):
         self.serial_number = serial_number
         self.is_recording = False
         self.loop = True
-        self.image_buffer = {"timestamps":[], 'color':np.zeros((300,480,640,3)), 'depth':np.zeros((300,480,640))}
+        self.image_buffer = {"cam_timestamps":NumpyAccumulator(dtype=np.float64), 'color': NumpyAccumulator(shape_suffix=(480,640,3),dtype=np.uint8), 'depth': NumpyAccumulator(shape_suffix=(480,640), dtype=np.uint16)}
         self.i=0
 
     def run(self):
@@ -78,9 +79,10 @@ class CameraCaptureProcess(mp.Process):
                 # print(depth.shape)
 
                 if self.is_recording:
-                    print("PUTTING DATA RIGHT NOW")
                     self._put_data(receive_time, color, depth)
-
+                    cv2.namedWindow('RealSense', cv2.WINDOW_AUTOSIZE)
+                    cv2.imshow('RealSense', color)
+                    cv2.waitKey(1)
 
                 duration = time.time() - now_epoch
                 frequency = np.round(1 / duration, 1)
@@ -90,6 +92,7 @@ class CameraCaptureProcess(mp.Process):
             print(f"[Camera-Worker-{self.serial_number}] Critical Error: {e}")
         finally:
             print(f"[Camera-Worker-{self.serial_number}] Shutting down camera...")
+            cv2.destroyAllWindows()
             pipeline.stop()
 
     def _handle_commands(self):
@@ -105,17 +108,17 @@ class CameraCaptureProcess(mp.Process):
             elif cmd['type'] == 'STOP_REC':
                 self.is_recording = False
                 self._send_data()
+                cv2.destroyAllWindows()
+
                 # Send confirmation back to Conductor after saving
                 
 
     def _put_data(self, receive_time, color, depth):
-        self.image_buffer['timestamps'].append(receive_time)
-        self.image_buffer["color"][self.i] = color
-        self.image_buffer['depth'][self.i] = depth
-        self.i += 1
+        self.image_buffer['cam_timestamps'].append(receive_time)
+        self.image_buffer["color"].append(color)
+        self.image_buffer['depth'].append(depth)
     
     def _send_data(self):
-        for key, val in self.image_buffer.items():
-            self.image_buffer[key] = np.array(val)
-        self.data_queue.put(dict(self.image_buffer))
-        self.image_buffer.clear()
+        self.data_queue.put({k:v.data for k,v in self.image_buffer.items()})
+        for k, v in self.image_buffer.items():
+            v.reset()

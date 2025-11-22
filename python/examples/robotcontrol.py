@@ -9,21 +9,23 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(ROOT_DIR)
 os.chdir(ROOT_DIR)
 import arx5_interface as arx5
+from helper import NumpyAccumulator
 
-MAX_TORQUE = 0.75
+MAX_TORQUE = 1.5 / 2 - 1e-2
 
-def friction_compensation(vel):
+K_COULOMB = 0.12  # Nm (Assists your push)
+K_VISCOUS = 0.07 # Nm/(rad/s)
+
+VEL_DEADBAND = 0.02 # rad/s (Ignore small accidental movements)
+
+def sign(x):
+    return 1.0 if x > 0 else -1.0 if x < 0 else 0.0
+def friction_compensation(current_vel):
     # vel: joint velocity (rad/s)
-    k = 0.45             # your viscous coefficient
-    assist = 0.05        # constant help torque
-    v_dead = 0.003       # below this, treat as “not moving”
-
-    if abs(vel) < v_dead:
-        tau = 0.0                               # no movement → no torque
+    if abs(current_vel) > VEL_DEADBAND:
+        return (K_COULOMB * sign(current_vel)) + (K_VISCOUS * current_vel)
     else:
-        direction = np.sign(vel)
-        tau = k * vel + assist * direction      # add small constant help
-    return float(np.clip(tau, -MAX_TORQUE, MAX_TORQUE))
+        return 0.0
 
 # --- The Robot Process Class ---
 class RobotControlProcess(mp.Process):
@@ -34,7 +36,13 @@ class RobotControlProcess(mp.Process):
         self.config = config
         self.is_recording = False
         self.loop = True
-        self.action_buffer = defaultdict(list)
+        self.action_buffer = {
+            "joint_pos_L": NumpyAccumulator(shape_suffix=(config["dof"],)),
+            "gripper_pos_L": NumpyAccumulator(),
+            "joint_pos_R": NumpyAccumulator(shape_suffix=(config["dof"],)),
+            "gripper_pos_R": NumpyAccumulator(),
+            "action_timestamps": NumpyAccumulator(dtype=np.float64)
+        }
 
     def run(self):
         try:
@@ -85,7 +93,6 @@ class RobotControlProcess(mp.Process):
 
                 # 2. Teleoperation Logic
                 action_data = self._run_teleop_step(leader_L, leader_R, follower_L, follower_R)
-
                 # convert scheduled monotonic -> epoch
                 timestamp = t_cycle_end - now_mono + now_epoch
 
@@ -135,16 +142,16 @@ class RobotControlProcess(mp.Process):
         l_state_R = l_R.get_joint_state() # leader state right
 
         # Compute & Write Leader Commands (Friction Comp)
-        # tau_L = friction_compensation(l_state_L.gripper_vel)
-        # tau_R = friction_compensation(l_state_R.gripper_vel)
+        tau_L = friction_compensation(l_state_L.gripper_vel)
+        tau_R = friction_compensation(l_state_R.gripper_vel)
         
-        # joint_cmd = arx5.JointState(self.dof)
-        # joint_cmd.gripper_torque = tau_L
-        # l_L.set_joint_cmd(joint_cmd)
+        joint_cmd = arx5.JointState(self.dof)
+        joint_cmd.gripper_torque = tau_L
+        l_L.set_joint_cmd(joint_cmd)
 
-        # joint_cmd = arx5.JointState(self.dof)
-        # joint_cmd.gripper_torque = tau_R
-        # l_R.set_joint_cmd(joint_cmd)
+        joint_cmd = arx5.JointState(self.dof)
+        joint_cmd.gripper_torque = tau_R
+        l_R.set_joint_cmd(joint_cmd)
 
         # Write Follower Commands (Position Tracking)
         f_cmd_L = arx5.JointState(self.dof)
@@ -161,9 +168,9 @@ class RobotControlProcess(mp.Process):
         f_R.set_joint_cmd(f_cmd_R)
 
         return {
-            "joint_pos_L": f_cmd_L.pos(),
+            "joint_pos_L": f_cmd_L.pos().copy(),
             "gripper_pos_L": f_cmd_L.gripper_pos,
-            "joint_pos_R": f_cmd_R.pos(),
+            "joint_pos_R": f_cmd_R.pos().copy(),
             "gripper_pos_R": f_cmd_R.gripper_pos,
         }
 
@@ -177,7 +184,7 @@ class RobotControlProcess(mp.Process):
         self.action_buffer['action_timestamps'].append(timestamp)
     
     def _send_data(self):
-        for key, val in self.action_buffer.items():
-            self.action_buffer[key] = np.array(val)
-        self.data_queue.put(dict(self.action_buffer))
-        self.action_buffer.clear()
+        send = {k:v.data for k,v in self.action_buffer.items()}
+        self.data_queue.put(send)
+        for k, v in self.action_buffer.items():
+            v.reset()
