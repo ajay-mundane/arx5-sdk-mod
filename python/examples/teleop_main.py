@@ -46,10 +46,10 @@ class Conductor:
         
         # Create communication channels
         self.cmd_q_robot = mp.Queue()
-        self.cmd_q_camera = mp.Queue()
+        self.cmd_q_cameras = {}
 
         self.data_q_robot = mp.Queue()
-        self.data_q_camera = mp.Queue()
+        self.data_q_cameras = {}
 
         # Hardware Config
         leader_cfg = ('X5', 'can0', 'can1') # Model, Left Interface, Right Interface
@@ -68,10 +68,22 @@ class Conductor:
         self.robot_proc.start()
 
         # Start Cameras (as discussed before)
-        # self.camera_procs = [] let's loop this for all cameras
-        serial = self.get_connected_devices_serial()[0]
-        self.camera_proc = CameraCaptureProcess(self.cmd_q_camera, self.data_q_camera, camera_config, serial)
-        self.camera_proc.start()
+        self.camera_procs = {} # let's loop this for all cameras
+        serials = self.get_connected_devices_serial()
+        for serial in serials:
+            cmd_q_camera = mp.Queue()
+            data_q_camera = mp.Queue()
+            self.cmd_q_cameras[serial] = cmd_q_camera
+            self.data_q_cameras[serial] = data_q_camera
+            camera_config = {
+                "resolution": (640, 480),
+                "capture_fps": 30,
+                "enable_color": True,
+                "enable_depth": True
+            }
+            new_camera_proc = CameraCaptureProcess(cmd_q_camera, data_q_camera, camera_config, serial)
+            self.camera_procs[serial] = new_camera_proc
+            new_camera_proc.start()
 
         self.ep_idx = 0
         self.save_to_disk = False
@@ -119,25 +131,31 @@ class Conductor:
 
     def start_recording(self):
         self.cmd_q_robot.put({'type': 'START_REC', 'ep_idx': self.ep_idx})
-        self.cmd_q_camera.put({'type': 'START_REC', 'ep_idx': self.ep_idx})
+        for serial, cmd_q in self.cmd_q_cameras.items():
+            cmd_q.put({'type': 'START_REC', 'ep_idx': self.ep_idx})
     
 
     def stop_recording(self):
         self.cmd_q_robot.put({'type': 'STOP_REC', 'ep_idx': self.ep_idx})
-        self.cmd_q_camera.put({'type': 'STOP_REC', 'ep_idx': self.ep_idx})
+        for serial, cmd_q in self.cmd_q_cameras.items():
+            cmd_q.put({'type': 'STOP_REC', 'ep_idx': self.ep_idx})
 
     def finish(self):
         self.cmd_q_robot.put({'type': 'EXIT', 'ep_idx': self.ep_idx})
-        self.cmd_q_camera.put({'type': 'EXIT', 'ep_idx': self.ep_idx})
+        for serial, cmd_q in self.cmd_q_cameras.items():
+            cmd_q.put({'type': 'EXIT', 'ep_idx': self.ep_idx})
         self.robot_proc.join()
-        self.camera_proc.join()
+        for serial, camera_proc in self.camera_procs.items():
+            camera_proc.join()
 
 
     def receive_and_save_data(self):
         # 1. get data from queues after end recording
         robot_action_data = self.data_q_robot.get()
-        camera_obs_data = self.data_q_camera.get()
-        print(f"Received data: robot {robot_action_data['joint_pos_R']}, cam {camera_obs_data['color'].shape}")
+        for serial, data_q in self.data_q_cameras.items():
+            camera_obs_data = data_q.get()
+        # TODO: for now, we are assuming only one camera, let's handle both and store them via serial number
+        # print(f"Received data: robot {robot_action_data['joint_pos_R'].shape}, cam {camera_obs_data['color'].shape}")
 
         # 2. match each robot action data to a camera obs using timestamps - testing purposes its fine
         print("Matching section")
@@ -155,7 +173,6 @@ class Conductor:
 
             camera_obs_data[key] = value[mask]
 
-        print(robot_action_data['joint_pos_R'])
 
         n_acts = len(robot_action_data['action_timestamps'])
         n_obs = len(camera_obs_data['cam_timestamps'])
@@ -171,7 +188,7 @@ class Conductor:
             episode_id = self.replay_buffer.n_episodes - 1
             self.ep_idx = self.replay_buffer.n_episodes
 
-            print(f'Episode {episode_id} saved!')
+            print(f'Episode {episode_id} saved! Appxrox time: {n_obs/30:.2f} sec')
 
 
 

@@ -63,7 +63,7 @@ class CameraCaptureProcess(mp.Process):
                 frameset = pipeline.wait_for_frames()
                 receive_time = time.time()
                 # align frames to color
-                # frameset = align.process(frameset)
+                frameset = align.process(frameset)
 
                 # realsense report in ms
                 # data['camera_capture_timestamp'] = frameset.get_timestamp() / 1000 - NOTE: we could convert capture timestamp to epoch timestamp

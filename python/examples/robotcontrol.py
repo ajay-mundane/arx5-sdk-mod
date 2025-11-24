@@ -13,8 +13,8 @@ from helper import NumpyAccumulator
 
 MAX_TORQUE = 1.5 / 2 - 1e-2
 
-K_COULOMB = 0.12  # Nm (Assists your push)
-K_VISCOUS = 0.07 # Nm/(rad/s)
+K_COULOMB = 0.11  # Nm (Assists your push)
+K_VISCOUS = 0.05 # Nm/(rad/s)
 
 VEL_DEADBAND = 0.02 # rad/s (Ignore small accidental movements)
 
