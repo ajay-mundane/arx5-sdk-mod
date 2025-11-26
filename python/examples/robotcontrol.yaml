@@ -1,0 +1,22 @@
+dof: 6
+
+leader:
+  model: X5
+  left: can0
+  right: can1
+
+follower:
+  model: X5
+  left: can2
+  right: can3
+
+friction:
+  left_leader:
+    K_COULOMB: 0.08
+    K_VISCOUS: 0.03
+    VEL_DEADBAND: 0.02
+
+  right_leader:
+    K_COULOMB: 0.10
+    K_VISCOUS: 0.05
+    VEL_DEADBAND: 0.02

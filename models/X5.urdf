@@ -207,7 +207,7 @@
     <link name="link6">
         <inertial>
             <origin xyz="0.030 0 0" rpy="0 0 0"/> 
-            <mass value="0.571000"/> 
+            <mass value="0.651000"/> 
             <inertia 
                 ixx="0.00020"    ixy="0.00000" 
                 ixz="0.00000" 

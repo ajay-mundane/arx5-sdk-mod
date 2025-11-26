@@ -18,6 +18,7 @@ class NumpyAccumulator:
         dtype: dtype of the array
         """
         self.capacity = initial_capacity
+        self._initial_capacity = initial_capacity  # Store for reset purposes
         self.size = 0   # number of actual elements stored
         
         self.shape_suffix = shape_suffix
@@ -68,6 +69,9 @@ class NumpyAccumulator:
     
     def reset(self):
         self.size = 0
+        # Reset capacity to initial size and create new buffer
+        self.capacity = self._initial_capacity
+        self.buffer = np.zeros((self.capacity,) + self.shape_suffix, dtype=self.dtype)
 
 
 
@@ -763,3 +767,99 @@ def match_observations_to_actions(action_timestamps, cam_timestamps):
     
     return matched_indices[valid_mask], valid_mask
 
+def align_camera_timestamps(cameras_data):
+    """
+    Align camera timestamps using the camera with the least frames as baseline.
+    Returns aligned camera data where all cameras have the same number of observations.
+    """
+    if not cameras_data:
+        return {}
+    
+    # Find camera with minimum number of frames
+    min_frames = float('inf')
+    latest_start = -float('inf')
+    baseline_serial = None
+    for serial, data in cameras_data.items():
+        n_frames = len(data['cam_timestamps'])
+        if n_frames <= min_frames and data['cam_timestamps'][0] >= latest_start:
+            min_frames = n_frames
+            baseline_serial = serial
+            latest_start = data['cam_timestamps'][0]
+    
+    print(f"Using camera {baseline_serial} as baseline with {min_frames} frames")
+    baseline_timestamps = cameras_data[baseline_serial]['cam_timestamps']
+    
+    # Align all cameras to baseline timestamps
+    aligned_cameras = {}
+    for i, (serial, data) in enumerate(cameras_data.items()):
+        # Create aligned data with camera index naming
+        aligned_data = {}
+        
+        if serial == baseline_serial:
+            # Baseline camera - just rename keys with index
+            for key, value in data.items():
+                if key == 'cam_timestamps':
+                    aligned_data[key] = value
+                elif key == 'color':
+                    aligned_data[f'camera{i}_rgb'] = value
+                elif key == 'depth':
+                    aligned_data[f'camera{i}_depth'] = value
+                else:
+                    aligned_data[f'camera{i}_{key}'] = value
+        else:
+            # Other cameras - align to baseline
+            action_idxs, mask = match_observations_to_actions(
+                data['cam_timestamps'],
+                baseline_timestamps
+            )
+            
+            # Apply alignment
+            for key, value in data.items():
+                if key == 'cam_timestamps':
+                    aligned_data[key] = baseline_timestamps  # Use baseline timestamps
+                elif key == 'color':
+                    aligned_data[f'camera{i}_rgb'] = value[action_idxs]
+                elif key == 'depth':
+                    aligned_data[f'camera{i}_depth'] = value[action_idxs]
+                else:
+                    aligned_data[f'camera{i}_{key}'] = value[action_idxs]
+        
+        aligned_cameras[serial] = aligned_data
+    
+    # Merge all camera data into single dictionary
+    merged_data = {'cam_timestamps': baseline_timestamps}
+    for serial, data in aligned_cameras.items():
+        for key, value in data.items():
+            if key != 'cam_timestamps':  # Don't duplicate timestamps
+                merged_data[key] = value
+    
+    return merged_data
+
+
+
+def preprocess_robot_actions(robot_data):
+    """
+    Combine robot action keys into a single 'action' array.
+    Format: [joint_pos_L, gripper_pos_L, joint_pos_R, gripper_pos_R]
+    """
+    # Extract individual components
+    joint_pos_L = robot_data['joint_pos_L']  # Shape: (N, dof)
+    gripper_pos_L = robot_data['gripper_pos_L'].reshape(-1, 1)  # Shape: (N, 1)
+    joint_pos_R = robot_data['joint_pos_R']  # Shape: (N, dof)
+    gripper_pos_R = robot_data['gripper_pos_R'].reshape(-1, 1)  # Shape: (N, 1)
+    
+    # Concatenate all components
+    action = np.concatenate([
+        joint_pos_L,
+        gripper_pos_L,
+        joint_pos_R,
+        gripper_pos_R
+    ], axis=1)
+    
+    # Create new data dictionary with action and timestamps only
+    processed_data = {
+        'action': action,
+        'action_timestamps': robot_data['action_timestamps']
+    }
+    
+    return processed_data

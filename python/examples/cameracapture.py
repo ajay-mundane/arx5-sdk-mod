@@ -7,6 +7,7 @@ import sys
 import os
 import pyrealsense2 as rs
 import cv2
+from tqdm import tqdm
 from helper import NumpyAccumulator
 
 # --- The Camera Process Class ---
@@ -35,22 +36,24 @@ class CameraCaptureProcess(mp.Process):
             if self.config["enable_depth"]:
                 rs_config.enable_stream(rs.stream.depth, 
                     w, h, rs.format.z16, fps)
-            # if self.enable_infrared:
-            #     rs_config.enable_stream(rs.stream.infrared,
-            #         w, h, rs.format.y8, fps)
+            # if self.config["enable_infrared"]:
+            #     rs_config.enable_stream(rs.stream.infrared, 1, 
+            #         w, h, rs.format.rgb8, 30)
 
             rs_config.enable_device(self.serial_number)
 
             # start pipeline
             pipeline = rs.pipeline()
+            print(f"[Camera-{self.serial_number}] Starting pipeline with config: {w}x{h}@{fps}fps")
             pipeline_profile = pipeline.start(rs_config)
+            print(f"[Camera-{self.serial_number}] Pipeline started successfully {time.time():.3f}s")
 
             # report global time
             # https://github.com/IntelRealSense/librealsense/pull/3909
             device = pipeline_profile.get_device()
             sensors = device.query_sensors()
             for s in sensors:
-                if s.is_color_sensor():
+                if s.is_color_sensor() and self.config["alignment"]:
                     s.set_option(rs.option.global_time_enabled, 1)
 
         
@@ -63,7 +66,10 @@ class CameraCaptureProcess(mp.Process):
                 frameset = pipeline.wait_for_frames()
                 receive_time = time.time()
                 # align frames to color
-                frameset = align.process(frameset)
+                if self.config["alignment"]:
+                    frameset = align.process(frameset)
+                depth = None
+                color = None
 
                 # realsense report in ms
                 # data['camera_capture_timestamp'] = frameset.get_timestamp() / 1000 - NOTE: we could convert capture timestamp to epoch timestamp
@@ -80,9 +86,11 @@ class CameraCaptureProcess(mp.Process):
 
                 if self.is_recording:
                     self._put_data(receive_time, color, depth)
-                    cv2.namedWindow('RealSense', cv2.WINDOW_AUTOSIZE)
-                    cv2.imshow('RealSense', color)
-                    cv2.waitKey(1)
+                    if color is not None:
+                        window_name = f'RealSense-{self.serial_number}'
+                        cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
+                        cv2.imshow(window_name, color)
+                        cv2.waitKey(1)
 
                 duration = time.time() - now_epoch
                 frequency = np.round(1 / duration, 1)
@@ -115,10 +123,45 @@ class CameraCaptureProcess(mp.Process):
 
     def _put_data(self, receive_time, color, depth):
         self.image_buffer['cam_timestamps'].append(receive_time)
-        self.image_buffer["color"].append(color)
-        self.image_buffer['depth'].append(depth)
+        if color is not None:
+            self.image_buffer["color"].append(color)
+        if depth is not None:
+            self.image_buffer['depth'].append(depth)
     
     def _send_data(self):
-        self.data_queue.put({k:v.data for k,v in self.image_buffer.items()})
+        # Send data in chunks to avoid memory issues with large recordings
+        CHUNK_SIZE = 200  # frames per chunk
+        
+        # Get data arrays
+        data = {k: v.data for k, v in self.image_buffer.items()}
+        total_frames = len(data['cam_timestamps'])
+        
+        if total_frames == 0:
+            # Send empty data indicator
+            self.data_queue.put({'chunk_id': 0, 'total_chunks': 1, 'data': data})
+        else:
+            # Calculate number of chunks needed
+            total_chunks = (total_frames + CHUNK_SIZE - 1) // CHUNK_SIZE
+            
+            # Send data in chunks with progress bar
+            with tqdm(total=total_chunks, desc=f"Camera-{self.serial_number} sending", unit="chunk") as pbar:
+                for chunk_id in range(total_chunks):
+                    start_idx = chunk_id * CHUNK_SIZE
+                    end_idx = min(start_idx + CHUNK_SIZE, total_frames)
+                    
+                    chunk_data = {}
+                    for key, value in data.items():
+                        chunk_data[key] = value[start_idx:end_idx]
+                    
+                    chunk_msg = {
+                        'chunk_id': chunk_id,
+                        'total_chunks': total_chunks,
+                        'data': chunk_data
+                    }
+                    
+                    self.data_queue.put(chunk_msg)
+                    pbar.update(1)
+        
+        # Reset buffers
         for k, v in self.image_buffer.items():
             v.reset()

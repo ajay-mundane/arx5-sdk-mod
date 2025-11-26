@@ -5,6 +5,7 @@ import numpy as np
 import pickle
 import sys
 import os
+from tqdm import tqdm
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(ROOT_DIR)
 os.chdir(ROOT_DIR)
@@ -12,20 +13,12 @@ import arx5_interface as arx5
 from helper import NumpyAccumulator
 
 MAX_TORQUE = 1.5 / 2 - 1e-2
-
-K_COULOMB = 0.11  # Nm (Assists your push)
-K_VISCOUS = 0.05 # Nm/(rad/s)
-
-VEL_DEADBAND = 0.02 # rad/s (Ignore small accidental movements)
+K_COULOMB = 0.11  # default fallback
+K_VISCOUS = 0.05  # default fallback
+VEL_DEADBAND = 0.02
 
 def sign(x):
     return 1.0 if x > 0 else -1.0 if x < 0 else 0.0
-def friction_compensation(current_vel):
-    # vel: joint velocity (rad/s)
-    if abs(current_vel) > VEL_DEADBAND:
-        return (K_COULOMB * sign(current_vel)) + (K_VISCOUS * current_vel)
-    else:
-        return 0.0
 
 # --- The Robot Process Class ---
 class RobotControlProcess(mp.Process):
@@ -34,6 +27,14 @@ class RobotControlProcess(mp.Process):
         self.cmd_queue = cmd_queue       # To receive high-level commands
         self.data_queue = data_queue   # To send latest state for UI/Monitoring
         self.config = config
+        # friction configuration may contain keys like 'left_leader' and 'right_leader'
+        friction_cfg = config.get('friction', {}) if isinstance(config, dict) else {}
+        left_cfg = friction_cfg.get('left_leader', {}) if isinstance(friction_cfg, dict) else {}
+        right_cfg = friction_cfg.get('right_leader', {}) if isinstance(friction_cfg, dict) else {}
+        
+        # Create optimized friction compensation functions with baked-in coefficients
+        self._friction_left = self._make_friction_func(left_cfg)
+        self._friction_right = self._make_friction_func(right_cfg)
         self.is_recording = False
         self.loop = True
         self.action_buffer = {
@@ -43,6 +44,18 @@ class RobotControlProcess(mp.Process):
             "gripper_pos_R": NumpyAccumulator(),
             "action_timestamps": NumpyAccumulator(dtype=np.float64)
         }
+
+    def _make_friction_func(self, cfg):
+        """Create optimized friction compensation function with baked-in coefficients"""
+        Kc = float(cfg.get('K_COULOMB', K_COULOMB))
+        Kv = float(cfg.get('K_VISCOUS', K_VISCOUS))
+        Vdb = float(cfg.get('VEL_DEADBAND', VEL_DEADBAND))
+        
+        def friction_comp(vel):
+            if abs(vel) > Vdb:
+                return (Kc * sign(vel)) + (Kv * vel)
+            return 0.0
+        return friction_comp
 
     def run(self):
         try:
@@ -89,7 +102,7 @@ class RobotControlProcess(mp.Process):
                 t_cycle_end = self.t_start + (self.iter_idx + 1) * self.dt
                 
                 # 1. Handle Commands
-                self._handle_commands()
+                self._handle_commands(leader_L, leader_R, follower_L, follower_R)
 
                 # 2. Teleoperation Logic
                 action_data = self._run_teleop_step(leader_L, leader_R, follower_L, follower_R)
@@ -119,7 +132,7 @@ class RobotControlProcess(mp.Process):
             follower_L.reset_to_home()
             follower_R.reset_to_home()
 
-    def _handle_commands(self):
+    def _handle_commands(self, leader_L=None, leader_R=None, follower_L=None, follower_R=None):
         if not self.cmd_queue.empty():
             cmd = self.cmd_queue.get()
             
@@ -131,6 +144,26 @@ class RobotControlProcess(mp.Process):
 
             elif cmd['type'] == 'STOP_REC':
                 self.is_recording = False
+                
+                # Reset robots to home position after stopping recording
+                if leader_L and leader_R and follower_L and follower_R:
+                    print("[Robot-Worker] Resetting robots to home after recording...")
+                    leader_L.reset_to_home()
+                    leader_R.reset_to_home()
+                    follower_L.reset_to_home()
+                    follower_R.reset_to_home()
+                    gain = arx5.Gain(self.dof)
+                    gain.kd()[:] = 0.01
+                    gain.gripper_kp = 0.0
+                    gain.gripper_kd = 0.0
+                    leader_L.set_gain(gain)
+
+                    gain = arx5.Gain(self.dof)
+                    gain.kd()[:] = 0.01
+                    gain.gripper_kp = 0.0
+                    gain.gripper_kd = 0.0
+                    leader_R.set_gain(gain)
+                
                 self._send_data()
                 # Send confirmation back to Conductor after saving
                 
@@ -142,8 +175,8 @@ class RobotControlProcess(mp.Process):
         l_state_R = l_R.get_joint_state() # leader state right
 
         # Compute & Write Leader Commands (Friction Comp)
-        tau_L = friction_compensation(l_state_L.gripper_vel)
-        tau_R = friction_compensation(l_state_R.gripper_vel)
+        tau_L = self._friction_left(l_state_L.gripper_vel)
+        tau_R = self._friction_right(l_state_R.gripper_vel)
         
         joint_cmd = arx5.JointState(self.dof)
         joint_cmd.gripper_torque = tau_L
@@ -184,7 +217,39 @@ class RobotControlProcess(mp.Process):
         self.action_buffer['action_timestamps'].append(timestamp)
     
     def _send_data(self):
-        send = {k:v.data for k,v in self.action_buffer.items()}
-        self.data_queue.put(send)
+        # Send robot data in chunks for consistency with camera data
+        CHUNK_SIZE = 1000  # Robot data is smaller, can use larger chunks
+        
+        # Get data arrays
+        data = {k: v.data for k, v in self.action_buffer.items()}
+        total_frames = len(data['action_timestamps'])
+        
+        if total_frames == 0:
+            # Send empty data indicator
+            self.data_queue.put({'chunk_id': 0, 'total_chunks': 1, 'data': data})
+        else:
+            # Calculate number of chunks needed
+            total_chunks = (total_frames + CHUNK_SIZE - 1) // CHUNK_SIZE
+            
+            # Send data in chunks with progress bar
+            with tqdm(total=total_chunks, desc="Robot sending", unit="chunk") as pbar:
+                for chunk_id in range(total_chunks):
+                    start_idx = chunk_id * CHUNK_SIZE
+                    end_idx = min(start_idx + CHUNK_SIZE, total_frames)
+                    
+                    chunk_data = {}
+                    for key, value in data.items():
+                        chunk_data[key] = value[start_idx:end_idx]
+                    
+                    chunk_msg = {
+                        'chunk_id': chunk_id,
+                        'total_chunks': total_chunks,
+                        'data': chunk_data
+                    }
+                    
+                    self.data_queue.put(chunk_msg)
+                    pbar.update(1)
+        
+        # Reset buffers
         for k, v in self.action_buffer.items():
             v.reset()

@@ -5,9 +5,11 @@ import multiprocessing as mp
 from robotcontrol import RobotControlProcess
 from cameracapture import CameraCaptureProcess
 import pyrealsense2 as rs
-from helper import ReplayBuffer, match_observations_to_actions
+from helper import ReplayBuffer, match_observations_to_actions, align_camera_timestamps, preprocess_robot_actions
 import numpy as np
 import pathlib
+from omegaconf import OmegaConf
+from tqdm import tqdm
 
 class KeystrokeCounter(Listener):
     def __init__(self):
@@ -51,9 +53,13 @@ class Conductor:
         self.data_q_robot = mp.Queue()
         self.data_q_cameras = {}
 
-        # Hardware Config
-        leader_cfg = ('X5', 'can0', 'can1') # Model, Left Interface, Right Interface
-        follower_cfg = ('X5', 'can2', 'can3')
+        # Hardware Config - load from YAML
+        config_path = pathlib.Path(__file__).resolve().parent.joinpath('robotcontrol.yaml')
+        rcfg = OmegaConf.load(str(config_path))
+        leader_cfg = (rcfg.leader.model, rcfg.leader.left, rcfg.leader.right)
+        follower_cfg = (rcfg.follower.model, rcfg.follower.left, rcfg.follower.right)
+        dof = int(rcfg.dof)
+        friction_cfg = OmegaConf.to_container(rcfg.friction, resolve=True)
 
         # Camera config
         camera_config = {
@@ -64,7 +70,8 @@ class Conductor:
         }
 
         # Start Robot Process
-        self.robot_proc = RobotControlProcess(self.cmd_q_robot, self.data_q_robot, {"leader":leader_cfg, "follower":follower_cfg, "dof": 6})
+        robot_cfg = {"leader": leader_cfg, "follower": follower_cfg, "dof": dof, "friction": friction_cfg}
+        self.robot_proc = RobotControlProcess(self.cmd_q_robot, self.data_q_robot, robot_cfg)
         self.robot_proc.start()
 
         # Start Cameras (as discussed before)
@@ -79,8 +86,14 @@ class Conductor:
                 "resolution": (640, 480),
                 "capture_fps": 30,
                 "enable_color": True,
-                "enable_depth": True
+                "enable_depth": True,
+                "alignment": True
+                # "enable_infrared": False
             }
+            # if serial in ['419522072281']:#,'317622071752']:
+                # camera_config["alignment"] = False
+                # Reduce bandwidth for problematic camera
+                # camera_config["enable_depth"] = False
             new_camera_proc = CameraCaptureProcess(cmd_q_camera, data_q_camera, camera_config, serial)
             self.camera_procs[serial] = new_camera_proc
             new_camera_proc.start()
@@ -149,46 +162,101 @@ class Conductor:
             camera_proc.join()
 
 
+    def _receive_chunked_data(self, data_queue, source_name):
+        """Receive and reassemble chunked data from a process"""
+        chunks = []
+        total_chunks = None
+        
+        # Receive all chunks
+        while True:
+            chunk_msg = data_queue.get()
+            chunks.append(chunk_msg)
+            
+            if total_chunks is None:
+                total_chunks = chunk_msg['total_chunks']
+                print(f"Expecting {total_chunks} chunks from {source_name}")
+            
+            if len(chunks) >= total_chunks:
+                break
+        
+        # Sort chunks by chunk_id to ensure correct order
+        chunks.sort(key=lambda x: x['chunk_id'])
+        
+        # Reassemble data
+        if total_chunks == 1 and len(chunks[0]['data']['cam_timestamps'] if 'cam_timestamps' in chunks[0]['data'] else chunks[0]['data']['action_timestamps']) == 0:
+            # Handle empty data case
+            return chunks[0]['data']
+        
+        assembled_data = {}
+        for key in chunks[0]['data'].keys():
+            # Concatenate all chunks for this key
+            key_data = [chunk['data'][key] for chunk in chunks]
+            assembled_data[key] = np.concatenate(key_data, axis=0)
+        
+        return assembled_data
+    
     def receive_and_save_data(self):
-        # 1. get data from queues after end recording
-        robot_action_data = self.data_q_robot.get()
+        # 1. Get data from queues after end recording (now with chunking)
+        print("Receiving robot data...")
+        robot_action_data = self._receive_chunked_data(self.data_q_robot, "robot")
+        
+        # Collect all camera data
+        cameras_data = {}
         for serial, data_q in self.data_q_cameras.items():
-            camera_obs_data = data_q.get()
-        # TODO: for now, we are assuming only one camera, let's handle both and store them via serial number
-        # print(f"Received data: robot {robot_action_data['joint_pos_R'].shape}, cam {camera_obs_data['color'].shape}")
-
-        # 2. match each robot action data to a camera obs using timestamps - testing purposes its fine
-        print("Matching section")
+            print(f"Receiving camera {serial} data...")
+            camera_data = self._receive_chunked_data(data_q, f"camera-{serial}")
+            cameras_data[serial] = camera_data
+            print(f"cam serial {serial} {camera_data['color'].shape}, {camera_data['depth'].shape}")
+        
+        print(f"Received data: robot {robot_action_data['joint_pos_R'].shape}")
+        
+        # 2. Align camera timestamps using camera with least frames as baseline
+        print("Aligning camera timestamps...")
+        aligned_camera_data = align_camera_timestamps(cameras_data)
+        
+        # 3. Preprocess robot actions - combine into single action array
+        print("Preprocessing robot actions...")
+        processed_robot_data = preprocess_robot_actions(robot_action_data)
+        
+        # 4. Match robot actions to aligned camera observations using baseline timestamps
+        print("Matching robot actions to camera observations...")
         action_idxs, mask = match_observations_to_actions(
-            robot_action_data['action_timestamps'], 
-            camera_obs_data['cam_timestamps']
+            processed_robot_data['action_timestamps'],
+            aligned_camera_data['cam_timestamps']
         )
-
-        for key, value in robot_action_data.items():
-
-            robot_action_data[key] = value[action_idxs]
-
-
-        for key, value in camera_obs_data.items():
-
-            camera_obs_data[key] = value[mask]
-
-
-        n_acts = len(robot_action_data['action_timestamps'])
-        n_obs = len(camera_obs_data['cam_timestamps'])
+        
+        # Apply alignment to robot data
+        for key, value in processed_robot_data.items():
+            processed_robot_data[key] = value[action_idxs]
+        
+        # Apply alignment to camera data
+        for key, value in aligned_camera_data.items():
+            aligned_camera_data[key] = value[mask]
+        
+        # Verify alignment
+        n_acts = len(processed_robot_data['action_timestamps'])
+        n_obs = len(aligned_camera_data['cam_timestamps'])
         assert n_acts == n_obs, f"Mismatch! Robot: {n_acts}, Cam: {n_obs}"
- 
-
-
-        # NOTE: at this point, we will have {joint_pos: np.array(ep_len, D), gripper_pos: np.array(ep_len, D), action_timestamps: np.array(ep_len), cameraL: np.array(ep_len), cameraR: np.array(ep_len), cameraHead: np.array(ep_len)}
-        # 3. save data - replay buffer stuff
-        print("Saving part")
+        
+        print(f"Final aligned data: {n_acts} timesteps")
+        print(f"Action shape: {processed_robot_data['action'].shape}")
+        
+        # 5. Save data to replay buffer
+        print("Saving episode...")
         if self.save_to_disk:
-            self.replay_buffer.add_episode(robot_action_data | camera_obs_data, compressors='disk')
+            episode_data = processed_robot_data | aligned_camera_data
+            self.replay_buffer.add_episode(episode_data, compressors='disk')
             episode_id = self.replay_buffer.n_episodes - 1
             self.ep_idx = self.replay_buffer.n_episodes
-
-            print(f'Episode {episode_id} saved! Appxrox time: {n_obs/30:.2f} sec')
+            
+            print(f'Episode {episode_id} saved! Approx time: {n_obs/30:.2f} sec')
+            
+            # Print summary of saved data
+            for key, value in episode_data.items():
+                if hasattr(value, 'shape'):
+                    print(f"  {key}: {value.shape}")
+                else:
+                    print(f"  {key}: {type(value)}")
 
 
 
@@ -207,5 +275,5 @@ class Conductor:
         return serials
 
 
-c = Conductor(save_dir="./data")
+c = Conductor(save_dir="./data") # "./data"
 c.loop()

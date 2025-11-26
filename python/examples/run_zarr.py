@@ -67,4 +67,4 @@ def run_episode_from_zarr(zarr_path, episode_id, robot_model="X5", interface_nam
     controller.reset_to_home()
     controller2.reset_to_home()
 # Example usage:
-run_episode_from_zarr("/home/ajay/Documents/arx5-sdk/python/data/replay_buffer.zarr", episode_id=2)
+run_episode_from_zarr("/home/ajay/Documents/arx5-sdk/python/data/replay_buffer.zarr", episode_id=0)
