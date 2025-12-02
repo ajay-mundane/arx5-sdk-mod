@@ -807,25 +807,25 @@ def align_camera_timestamps(cameras_data):
                 else:
                     aligned_data[f'camera{i}_{key}'] = value
         else:
-            # Other cameras - align to baseline
-            action_idxs, mask = match_observations_to_actions(
-                data['cam_timestamps'],
-                baseline_timestamps
-            )
+            # Other cameras - find closest matches to each baseline timestamp
+            # Use searchsorted to find closest timestamps in the other camera
+            indices = np.searchsorted(data['cam_timestamps'], baseline_timestamps, side='left')
+            # Clamp indices to valid range
+            indices = np.clip(indices, 0, len(data['cam_timestamps']) - 1)
             
-            # Apply alignment
             for key, value in data.items():
                 if key == 'cam_timestamps':
-                    aligned_data[key] = baseline_timestamps  # Use baseline timestamps
+                    aligned_data[key] = baseline_timestamps  # Use exact baseline timestamps
                 elif key == 'color':
-                    aligned_data[f'camera{i}_rgb'] = value[action_idxs]
+                    aligned_data[f'camera{i}_rgb'] = value[indices]
                 elif key == 'depth':
-                    aligned_data[f'camera{i}_depth'] = value[action_idxs]
+                    aligned_data[f'camera{i}_depth'] = value[indices]
                 else:
-                    aligned_data[f'camera{i}_{key}'] = value[action_idxs]
+                    aligned_data[f'camera{i}_{key}'] = value[indices]
         
         aligned_cameras[serial] = aligned_data
     
+    # All cameras should now have exactly min_frames length (same as baseline)
     # Merge all camera data into single dictionary
     merged_data = {'cam_timestamps': baseline_timestamps}
     for serial, data in aligned_cameras.items():
@@ -837,7 +837,7 @@ def align_camera_timestamps(cameras_data):
 
 
 
-def preprocess_robot_actions(robot_data):
+def preprocess_robot_actions(robot_data, timestamps_key='action_timestamps'):
     """
     Combine robot action keys into a single 'action' array.
     Format: [joint_pos_L, gripper_pos_L, joint_pos_R, gripper_pos_R]
@@ -857,9 +857,14 @@ def preprocess_robot_actions(robot_data):
     ], axis=1)
     
     # Create new data dictionary with action and timestamps only
-    processed_data = {
-        'action': action,
-        'action_timestamps': robot_data['action_timestamps']
-    }
+    if timestamps_key is not None:
+        processed_data = {
+            'action': action,
+            'action_timestamps': robot_data[timestamps_key]
+        }
+    else:
+        processed_data = {
+            'action': action
+        }
     
     return processed_data

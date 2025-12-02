@@ -12,15 +12,14 @@ from helper import NumpyAccumulator
 
 # --- The Camera Process Class ---
 class CameraCaptureProcess(mp.Process):
-    def __init__(self, cmd_queue, data_queue, config, serial_number):
-        super().__init__(name="Robot-Worker")
+    def __init__(self, cmd_queue, config, serial_number, obs_buffer=None):
+        super().__init__(name="Camera-Worker")
         self.cmd_queue = cmd_queue       # To receive high-level commands
-        self.data_queue = data_queue   # To send latest state for UI/Monitoring
         self.config = config
         self.serial_number = serial_number
+        self.obs_buffer = obs_buffer     # Shared memory ring buffer for observations
         self.is_recording = False
         self.loop = True
-        self.image_buffer = {"cam_timestamps":NumpyAccumulator(dtype=np.float64), 'color': NumpyAccumulator(shape_suffix=(480,640,3),dtype=np.uint8), 'depth': NumpyAccumulator(shape_suffix=(480,640), dtype=np.uint16)}
         self.i=0
 
     def run(self):
@@ -33,13 +32,9 @@ class CameraCaptureProcess(mp.Process):
             if self.config["enable_color"]:
                 rs_config.enable_stream(rs.stream.color, 
                     w, h, rs.format.bgr8, fps)
-            else:
-                del self.image_buffer['color']
             if self.config["enable_depth"]:
                 rs_config.enable_stream(rs.stream.depth, 
                     w, h, rs.format.z16, fps)
-            else:
-                del self.image_buffer['depth']
             # if self.config["enable_infrared"]:
             #     rs_config.enable_stream(rs.stream.infrared, 1, 
             #         w, h, rs.format.rgb8, 30)
@@ -86,15 +81,22 @@ class CameraCaptureProcess(mp.Process):
                     depth = np.asanyarray(
                         frameset.get_depth_frame().get_data())
 
-                # print(depth.shape)
+                # Put observations in ring buffer (always, not just when recording)
+                if self.obs_buffer is not None and color is not None:
+                    obs_data = {
+                        "color": color,
+                        "timestamp": receive_time
+                    }
+                    try:
+                        self.obs_buffer.put(obs_data, wait=False)
+                    except Exception as e:
+                        print(f"[Camera-Worker-{self.serial_number}] Failed to put obs in buffer: {e}")
 
-                if self.is_recording:
-                    self._put_data(receive_time, color, depth)
-                    if color is not None:
-                        window_name = f'RealSense-{self.serial_number}'
-                        cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
-                        cv2.imshow(window_name, color)
-                        cv2.waitKey(1)
+                if color is not None:
+                    window_name = f'RealSense-{self.serial_number}'
+                    cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
+                    cv2.imshow(window_name, color)
+                    cv2.waitKey(1)
 
                 duration = time.time() - now_epoch
                 frequency = np.round(1 / duration, 1)
@@ -111,7 +113,9 @@ class CameraCaptureProcess(mp.Process):
         if not self.cmd_queue.empty():
             cmd = self.cmd_queue.get()
             
-            if cmd['type'] == 'EXIT': self.loop = False
+            if cmd['type'] == 'EXIT': 
+                self.loop = False
+                cv2.destroyAllWindows()
 
             elif cmd['type'] == 'START_REC':
                 self.is_recording = True
@@ -119,53 +123,6 @@ class CameraCaptureProcess(mp.Process):
 
             elif cmd['type'] == 'STOP_REC':
                 self.is_recording = False
-                self._send_data()
                 cv2.destroyAllWindows()
 
                 # Send confirmation back to Conductor after saving
-                
-
-    def _put_data(self, receive_time, color, depth):
-        self.image_buffer['cam_timestamps'].append(receive_time)
-        if color is not None:
-            self.image_buffer["color"].append(color)
-        if depth is not None:
-            self.image_buffer['depth'].append(depth)
-    
-    def _send_data(self):
-        # Send data in chunks to avoid memory issues with large recordings
-        CHUNK_SIZE = 200  # frames per chunk
-        
-        # Get data arrays
-        data = {k: v.data for k, v in self.image_buffer.items()}
-        total_frames = len(data['cam_timestamps'])
-        
-        if total_frames == 0:
-            # Send empty data indicator
-            self.data_queue.put({'chunk_id': 0, 'total_chunks': 1, 'data': data})
-        else:
-            # Calculate number of chunks needed
-            total_chunks = (total_frames + CHUNK_SIZE - 1) // CHUNK_SIZE
-            
-            # Send data in chunks with progress bar
-            with tqdm(total=total_chunks, desc=f"Camera-{self.serial_number} sending", unit="chunk") as pbar:
-                for chunk_id in range(total_chunks):
-                    start_idx = chunk_id * CHUNK_SIZE
-                    end_idx = min(start_idx + CHUNK_SIZE, total_frames)
-                    
-                    chunk_data = {}
-                    for key, value in data.items():
-                        chunk_data[key] = value[start_idx:end_idx]
-                    
-                    chunk_msg = {
-                        'chunk_id': chunk_id,
-                        'total_chunks': total_chunks,
-                        'data': chunk_data
-                    }
-                    
-                    self.data_queue.put(chunk_msg)
-                    pbar.update(1)
-        
-        # Reset buffers
-        for k, v in self.image_buffer.items():
-            v.reset()

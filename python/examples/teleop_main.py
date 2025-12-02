@@ -66,7 +66,7 @@ class Conductor:
             "resolution": (640, 480),
             "capture_fps": 30,
             "enable_color": True,
-            "enable_depth": True
+            "enable_depth": False
         }
 
         # Start Robot Process
@@ -86,7 +86,7 @@ class Conductor:
                 "resolution": (640, 480),
                 "capture_fps": 30,
                 "enable_color": True,
-                "enable_depth": True,
+                "enable_depth": False,
                 "alignment": True
                 # "enable_infrared": False
             }
@@ -206,7 +206,8 @@ class Conductor:
             print(f"Receiving camera {serial} data...")
             camera_data = self._receive_chunked_data(data_q, f"camera-{serial}")
             cameras_data[serial] = camera_data
-            print(f"cam serial {serial} {camera_data['color'].shape}, {camera_data['depth'].shape}")
+            printer={key: value.shape for key, value in camera_data.items()}
+            print(f"cam serial {serial} {printer}")
         
         print(f"Received data: robot {robot_action_data['joint_pos_R'].shape}")
         
@@ -231,6 +232,7 @@ class Conductor:
         
         # Apply alignment to camera data
         for key, value in aligned_camera_data.items():
+            assert len(value) == len(mask), f"Length mismatch for camera data key {key}: len(value)={len(value)}, len(mask)={len(mask)}"
             aligned_camera_data[key] = value[mask]
         
         # Verify alignment
@@ -275,5 +277,5 @@ class Conductor:
         return serials
 
 
-c = Conductor(save_dir="./data") # "./data"
+c = Conductor(save_dir="./data2") # "./data"
 c.loop()

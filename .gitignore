@@ -2,5 +2,7 @@ build
 __pycache__
 *cpython*.so
 python/data
+python/*data*/
 build*
 .vscode/settings.json
+*.mp4

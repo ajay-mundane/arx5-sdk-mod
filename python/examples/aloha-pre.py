@@ -83,22 +83,23 @@ def main(leader_model: str, leader_interface: str, leader_interface2, follower_m
         while True:
             leader_joint_state = leader.get_joint_state()
             leader_joint_state2 = leader2.get_joint_state()
-            vel = leader_joint_state2.gripper_vel   # assume rad/s or same units expected
-            # print(vel)
-            # # Compute compensation torque
-            tau = friction_compensation(vel)
+            # vel = leader_joint_state2.gripper_vel   # assume rad/s or same units expected
+            # # print(vel)
+            # # # Compute compensation torque
+            # tau = friction_compensation(vel)
 
-            # # # Optional: if gripper is almost closed, set tau=0 (safety)
-            # # if leader_joint_state2.gripper_pos < 0.01:  # width threshold from your code
-            # #     tau = 0.0
+            # # # # Optional: if gripper is almost closed, set tau=0 (safety)
+            # # # if leader_joint_state2.gripper_pos < 0.01:  # width threshold from your code
+            # # #     tau = 0.0
 
-            # # # Clamp torque to safe limits
-            tau = float(np.clip(tau, -max_torque, max_torque))
-            # # print(tau)
-            # # # publish command
-            joint_cmd = arx5.JointState(robot_config.joint_dof)
-            joint_cmd.gripper_torque = tau
-            leader2.set_joint_cmd(joint_cmd)
+            # # # # Clamp torque to safe limits
+            # tau = float(np.clip(tau, -max_torque, max_torque))
+            # # # print(tau)
+            # # # # publish command
+            # joint_cmd = arx5.JointState(robot_config.joint_dof)
+            # joint_cmd.gripper_torque = tau
+            # leader2.set_joint_cmd(joint_cmd)
+            # print(leader_joint_state2.gripper_pos)
 
             # follower_joint_state = follower.get_joint_state()
 
@@ -112,7 +113,7 @@ def main(leader_model: str, leader_interface: str, leader_interface2, follower_m
             follower_joint_cmd2 = arx5.JointState(robot_config.joint_dof)
             follower_joint_cmd2.pos()[:] = leader_joint_state2.pos()
             follower_joint_cmd2.gripper_pos = leader_joint_state2.gripper_pos
-            
+            # print(follower_joint_cmd2.gripper_pos)
             # # If you want to decrease the delay of teleoperation , you can uncomment the following line
             # # This will partially include the velocity to the command, and you will need to pass these velocities
             # # into the policy layout
